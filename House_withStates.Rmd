@@ -1,0 +1,457 @@
+---
+title: "House, with States"
+author: Cameron Greenwalt, John Graff, Mitchell Rands
+output: html_document
+---
+
+<style type="text/css">
+h1.title {
+font-size: 40px;
+text-align: center;
+}
+h4.author {
+font-size: 40px;
+text-align: center;
+}
+</style>
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(GGally)
+library(ggfortify)  # plot lm objects using ggplot instead of base R
+library(car)  # needed for added-variable plots and dfbetas and dffits
+library(corrplot)  # colored correlation matrix
+library(bestglm)
+library(glmnet)
+library(leaps)
+library(fastDummies) # Easily makes dummy variables
+library(stringr)
+```
+
+Load the dataset.
+```{r}
+house <- read.csv("house.csv", header = TRUE, sep = ",")
+```
+
+
+Since all houses in this dataset come from Washington, we will drop the statezip and country columns. This analysis will use only city as a predictor in house price, so the street column will be removed as well.
+```{r}
+
+house <- subset(house, select = c(price, bedrooms, bathrooms, sqft_living,
+                                  sqft_lot, floors, waterfront, view,
+                                  condition, sqft_above, sqft_basement,
+                                  yr_built, yr_renovated, city))
+```
+
+Change the appropriate columns to factors.
+```{r}
+house$waterfront <- ifelse(house$waterfront == 0, "no", "yes")
+house$waterfront <- as.factor(house$waterfront)
+
+house$view <- as.factor(house$view)
+
+house$condition <- as.factor(house$condition)
+
+house$yr_renovated <- ifelse(house$yr_renovated == 0, "no", "yes")
+house$yr_renovated <- as.factor(house$yr_renovated)
+names(house)[13] <- "renovated"
+
+house$city <- as.factor(house$city)
+```
+
+Now that our data frame has been set up appropriately, we can print summaries to begin data exploration
+```{r}
+head(house)
+summary(house)
+```
+Create a linear model for the data set.
+```{r}
+house.lm <- lm(price ~ . , data = house)
+```
+
+Perform variable selection to narrow down the number of predictors. Since an exhaustive method is computationally unreasonable, sequential replacement and backward selection will be run.
+
+
+
+Backward Selection
+```{r}
+regsubsets.backward.out <-
+    regsubsets(price ~ .,
+               data = house,
+               nbest = 1,       # 1 best model for each number of predictors
+               nvmax = NULL,    # NULL for no limit on number of variables
+               force.in = NULL, force.out = NULL,
+               method = "backward")
+regsubsets.backward.out
+```
+
+```{r}
+regsubsets.seqrep.out <-
+    regsubsets(price ~ .,
+               data = house,
+               nbest = 1,       # 1 best model for each number of predictors
+               nvmax = NULL,    # NULL for no limit on number of variables
+               force.in = NULL, force.out = NULL,
+               method = "seqrep")
+regsubsets.seqrep.out
+```
+
+Plot the BIC and Cp for the Sequential Replacement Method.
+```{r}
+summary.seqrep.out <- summary(regsubsets.backward.out)
+
+plot(summary.seqrep.out$bic,
+     xlab="Number of Predicors",
+     ylab="BIC")
+
+plot(summary.seqrep.out$cp, xlab='P (# of predictors + 1)', ylab='Cp')
+abline(a=0,b=1)
+```
+
+Plot the BIC and Cp for the Backward Selection method.
+```{r, fig.align='center'}
+summary.backward.out <- summary(regsubsets.backward.out)
+
+plot(summary.backward.out$bic,
+     xlab="Number of Predicors",
+     ylab="BIC")
+
+plot(summary.backward.out$cp, xlab='P (# of predictors + 1)', ylab='Cp')
+abline(a=0,b=1)
+```
+
+
+
+
+BIC and Cp outputs from either selection method are very similar. To have a balance between low model complexity and low Cp value, we will average BIC and Cp to find a decent model.
+
+
+Find out which model had the lowest Cp
+```{r, fig.align='center'}
+average <- (summary.seqrep.out$cp + summary.seqrep.out$bic) / 2
+plot(average, xlab='P (# of predictors + 1)', ylab='Average between BIC and Cp')
+which.min(average)
+```
+
+
+The model with 20 predictors is the model with the lowest BIC that still lies under the Cp line. We will use that model
+```{r, fig.align='center'}
+as.data.frame(summary.seqrep.out$outmat[20, ])
+```
+
+The predictors to include in our model are bedrooms, bathrooms, sqft_living, waterfront, view, sqft_above, yr_built, and city.
+```{r, fig.align='center'}
+house.new <- subset(house, select = c(price, bedrooms, bathrooms, sqft_living,
+                                      waterfront, view, sqft_above, yr_built,
+                                      city))
+head(house.new, 5)
+
+house.new.lm <- lm(price ~ ., data = house.new)
+summary(house.new.lm)
+```
+
+
+#### Begin visual EDA
+
+
+Print a scatterplot matrix for the continuous variables.
+```{r, fig.align='center'}
+pairs(house.new[, c(1, 2, 3, 4, 7, 8)], pch = 20)
+```
+Print residuals vs predictors plots and residuals vs fitted values plot
+```{r, fig.align='center'}
+
+# Residuals vs predictors
+ggplot(data = house.new, 
+       mapping = aes(x = bedrooms, y = house.new.lm$residuals)) +
+  geom_point(alpha = 0.2) +
+  theme_bw() +
+  ylab("Residuals") +
+  theme(aspect.ratio = 1)
+
+ggplot(data = house.new, 
+       mapping = aes(x = bathrooms, y = house.new.lm$residuals)) +
+  geom_point(alpha = 0.2) +
+  theme_bw() +
+  ylab("Residuals") +
+  theme(aspect.ratio = 1)
+
+ggplot(data = house.new, 
+       mapping = aes(x = sqft_living, y = house.new.lm$residuals)) +
+  geom_point(alpha = 0.2) +
+  theme_bw() +
+  ylab("Residuals") +
+  theme(aspect.ratio = 1)
+
+ggplot(data = house.new, 
+       mapping = aes(x = sqft_above, y = house.new.lm$residuals)) +
+  geom_point(alpha = 0.2) +
+  theme_bw() +
+  ylab("Residuals") +
+  theme(aspect.ratio = 1)
+
+ggplot(data = house.new, 
+       mapping = aes(x = yr_built, y = house.new.lm$residuals)) +
+  geom_point(alpha = 0.2) +
+  theme_bw() +
+  ylab("Residuals") +
+  theme(aspect.ratio = 1)
+
+
+# Residuals vs fitted values
+autoplot(house.new.lm,
+         which = 1,
+         ncol = 1,
+         nrow = 1) + theme_bw() +
+  theme(aspect.ratio = 1) +
+  scale_y_continuous()
+```
+
+
+
+The residuals vs fitted values plot doesn't have event variance. Try logging the response variable to see if that helps.
+```{r, fig.align='center'}
+# Remove houses with a price of zero. Logging won't work otherwise.
+house.log <- house.new[!(house.new$price == 0),]
+
+house.log$price <- log(house.log$price)
+house.log.lm <- lm(price ~ . , data = house.log)
+summary(house.log.lm)
+```
+Print a scatterplot matrix for the continuous variables.
+```{r, fig.align='center'}
+pairs(house.log[, c(1, 2, 3, 4, 7, 8)], pch = 20)
+```
+
+Print residuals vs predictors plots and residuals vs fitted values plot
+```{r, fig.align='center'}
+
+# Residuals vs predictors
+ggplot(data = house.log, 
+       mapping = aes(x = bedrooms, y = house.log.lm$residuals)) +
+  geom_point(alpha = 0.2) +
+  theme_bw() +
+  ylab("Residuals") +
+  theme(aspect.ratio = 1)
+
+ggplot(data = house.log, 
+       mapping = aes(x = bathrooms, y = house.log.lm$residuals)) +
+  geom_point(alpha = 0.2) +
+  theme_bw() +
+  ylab("Residuals") +
+  theme(aspect.ratio = 1)
+
+ggplot(data = house.log, 
+       mapping = aes(x = sqft_living, y = house.log.lm$residuals)) +
+  geom_point(alpha = 0.2) +
+  theme_bw() +
+  ylab("Residuals") +
+  theme(aspect.ratio = 1)
+
+ggplot(data = house.log, 
+       mapping = aes(x = sqft_above, y = house.log.lm$residuals)) +
+  geom_point(alpha = 0.2) +
+  theme_bw() +
+  ylab("Residuals") +
+  theme(aspect.ratio = 1)
+
+ggplot(data = house.log, 
+       mapping = aes(x = yr_built, y = house.log.lm$residuals)) +
+  geom_point(alpha = 0.2) +
+  theme_bw() +
+  ylab("Residuals") +
+  theme(aspect.ratio = 1)
+
+
+# Residuals vs fitted values
+autoplot(house.log.lm,
+         which = 1,
+         ncol = 1,
+         nrow = 1) + theme_bw() +
+  theme(aspect.ratio = 1) +
+  scale_y_continuous()
+```
+
+Check for multi-collinearity
+```{r, fig.align='center'}
+house.only.continuous <- subset(house.log, select = c(price, bedrooms,
+                                                      bathrooms, sqft_living,
+                                                      sqft_above, yr_built))
+
+round(cor(house.only.continuous), 2)
+corrplot(cor(house.only.continuous), type = "upper")
+
+
+house.log.vifs <- vif(house.log.lm)
+house.log.vifs
+max(house.log.vifs)
+mean(house.log.vifs)
+```
+
+
+Sqft_living and sqft_above have a multi-collinearity problem. Since it makes more sense to keep sqft_living, we will remove sqft_above
+```{r, fig.align='center'}
+house.log <- house.log[, -7]
+```
+
+Remake the linear model and check for multicollinearity again.
+```{r, fig.align='center'}
+house.log.lm <- lm(price ~ . , data = house.log)
+summary(house.log.lm)
+
+house.only.continuous <- subset(house.log, select = c(price, bedrooms,
+                                                      bathrooms, sqft_living,
+                                                      yr_built))
+
+round(cor(house.only.continuous), 2)
+corrplot(cor(house.only.continuous), type = "upper")
+
+
+house.log.vifs <- vif(house.log.lm)
+house.log.vifs
+max(house.log.vifs)
+mean(house.log.vifs)
+```
+
+### Other linear regression assumptions to be put here . . .
+
+
+
+Influential points -> DFFITS
+```{r, fig.align='center'}
+house.log.dffits <- data.frame("dffits" = dffits(house.log.lm))
+house.log.dffits$obs <- 1:length(house.log$price)
+
+ggplot(data = house.log.dffits) +
+  geom_point(mapping = aes(x = obs, y = abs(dffits))) +
+  geom_hline(mapping = aes(yintercept = 2 * 
+                             sqrt(length(house.log.lm$coefficients) / 
+                                    length(obs))),
+             color = "red", linetype = "dashed") +
+  theme_bw() +
+  theme(aspect.ratio = 1)
+
+dffits <- house.log.dffits[abs(house.log.dffits$dffits)
+                              > 2 * sqrt(length(house.log.lm$coefficients)
+                                         / length(house.log.dffits$obs)), ]
+dffits$dffits <- abs(dffits$dffits) # This makes all dffits positive so the next
+                                      # operation is easier
+
+head(dffits[order(-dffits$dffits), ]) # This code orders the dffits dataframe
+                                        # in descending order by dffits
+```
+Remove observation 4346 and remake the linear model.
+```{r, fig.align='center'}
+house.log.new <- house.log[-c(4346),] 
+
+house.log.new.lm <- lm(house.log.new)
+```
+
+Recheck DFFITS
+```{r, fig.align='center'}
+house.log.new.dffits <- data.frame("dffits" = dffits(house.log.new.lm))
+house.log.new.dffits$obs <- 1:length(house.log.new$price)
+
+ggplot(data = house.log.new.dffits) +
+  geom_point(mapping = aes(x = obs, y = abs(dffits))) +
+  geom_hline(mapping = aes(yintercept = 2 * 
+                             sqrt(length(house.log.new.lm$coefficients) / 
+                                    length(obs))),
+             color = "red", linetype = "dashed") +
+  theme_bw() +
+  theme(aspect.ratio = 1)
+
+dffits <- house.log.new.dffits[abs(house.log.new.dffits$dffits)
+                              > 2 * sqrt(length(house.log.new.lm$coefficients)
+                                         / length(house.log.new.dffits$obs)), ]
+dffits$dffits <- abs(dffits$dffits) # This makes all dffits positive so the next
+                                      # operation is easier
+
+head(dffits[order(-dffits$dffits), ]) # This code orders the dffits dataframe
+                                        # in descending order by dffits
+```
+
+
+
+
+
+
+Now we will check for interactions between variables.
+```{r, fig.align='center'}
+house.inter <- lm(price ~ bedrooms * bathrooms +
+                    bedrooms * sqft_living +
+                    bedrooms * waterfront +
+                    bedrooms * view +
+                    bedrooms * yr_built +
+                    bedrooms * city +
+                    bathrooms * sqft_living +
+                    bathrooms * waterfront +
+                    bathrooms * view +
+                    bathrooms * yr_built +
+                    bathrooms * city +
+                    sqft_living * waterfront +
+                    sqft_living * view +
+                    sqft_living * yr_built +
+                    sqft_living * city +
+                    waterfront * view +
+                    waterfront * yr_built +
+                    waterfront * city +
+                    view * yr_built +
+                    view * city  +
+                    yr_built + city,
+                  data = house.log.new)
+summary(house.inter)
+
+# sqft_living yr_built, sqft_living view, bathrooms sqft_living, bedrooms yr_built, bedrooms view, bedrooms waterfront, bedrooms sqft_living, 
+```
+Only keep the significant interactions
+```{r, fig.align='center'}
+# sqft_living yr_built, sqft_living view, bathrooms sqft_living, bedrooms yr_built, bedrooms view, bedrooms waterfront, bedrooms sqft_living, 
+
+house.inter <- lm(price ~ . +
+                    sqft_living * yr_built +
+                    sqft_living * view +
+                    sqft_living * bathrooms +
+                    sqft_living * bedrooms +
+                    bedrooms * yr_built +
+                    bedrooms * view +
+                    bedrooms * waterfront,
+                  data = house.log.new)
+
+summary(house.inter)
+
+```
+Now that our model is done, predict a house.
+```{r, fig.align='center'}
+prediction <- 
+  predict(house.inter,
+          newdata=data.frame(bedrooms=5,
+                             bathrooms=3,
+                             sqft_living=4500,
+                             waterfront="yes",
+                             view="3",
+                             yr_built=2015,
+                             city="Seattle"),
+          interval="confidence",
+          level=.95)
+
+exp(prediction) # Convert back from the log scale
+```
+
+```{r, fig.align='center'}
+
+```
+
+```{r, fig.align='center'}
+
+```
+
+```{r, fig.align='center'}
+
+```
+
+```{r, fig.align='center'}
+
+```
+
+

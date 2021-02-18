@@ -1,0 +1,668 @@
+---
+title: "Predicting House Price"
+author: Cameron Greenwalt, John Graff, Mitchell Rands
+output: html_document
+---
+
+<style type="text/css">
+h1.title {
+font-size: 40px;
+text-align: center;
+}
+h4.author {
+font-size: 40px;
+text-align: center;
+}
+</style>
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(GGally)
+library(ggfortify)  # plot lm objects using ggplot instead of base R
+library(car)  # needed for added-variable plots and dfbetas and dffits
+library(corrplot)  # colored correlation matrix
+library(bestglm)
+library(glmnet)
+library(leaps)
+library(fastDummies) # Easily makes dummy variables
+```
+
+
+# Background and introduction. 
+
+
+The real estate market presents an interesting opportunity for data analysts to analyze and predict where property prices are moving towards. Prediction of property prices is becoming increasingly important and beneficial. Property prices are a good indicator of both the overall market condition and the economic health of a country. Considering the data provided, we are wrangling a large set of property sales records stored in an unknown format and with unknown data quality issues.
+
+
+Being able to predict house prices would be beneficial for those trying to sell and trying to buy.  Those looking to sell could put in the specifications of their house and see how much they could be expecting to receive and for those buying they can see what they want in a house and how much that will cost them.  
+
+
+To test these assumptions, we obtained 4600 data entrees for houses that sold. We will begin our analysis by applying basic summary statistics and exploratory data techniques to better understand the data. Then, we apply multiple linear regression with price as the response, regressed on the other variables in the data set. 
+
+Variable    |   Description
+------------|--------------
+Price       |   the price the house sold for. (Response variable)
+Bedrooms    |   the number of bedrooms in the house
+Bathrooms   |   number of bathrooms in the house 
+sqft_living |   amount of living square footage
+Sqft_lot    |   total square footage
+floors      |   number of floors in the house   
+Waterfront  |   if the house is waterfront
+View        |   view the house received
+Condition   |   condition of the house
+Square above|   square footage above ground
+Square base |   square footage of the basement
+Year built  |   year built
+Year Renovated |   if the house has been renovated. 
+
+
+The first thing we will do is load the dataset and print a summary.
+```{r, fig.align='center'}
+house <- read.csv("house.csv", header = TRUE, sep = ",")
+# head(house)
+
+# remove date and location columns
+house <- house[, c(2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14)]
+head(house)
+
+summary(house)
+```
+
+Next, we will change the approprate predictors to factors.
+```{r, fig.align='center'}
+
+# Since the original data treats them as 0,1 we will change to no/yes for interpretability
+house$waterfront <- ifelse(house$waterfront == 0, "no", "yes")
+house$waterfront <- as.factor(house$waterfront)
+
+house$view <- as.factor(house$view)
+
+house$condition <- as.factor(house$condition)
+
+# Change yr_renovated as yes/no
+house$yr_renovated <- ifelse(house$yr_renovated == 0, "no", "yes")
+house$yr_renovated <- as.factor(house$yr_renovated)
+house$renovated <- house$yr_renovated
+
+# Remove the yr_renovated column
+house <- house[, -13] # removes yr_renovated column
+
+head(house)
+summary(house)
+
+house.lm <- lm(house)
+summary(house.lm)
+```
+
+
+Bedrooms, bathrooms, and floors are all discrete variables. In this analysis, we will treat them as continuous. However, we will make a new dataframe with noise added to these variables for better visualization of the overall trend.
+```{r, fig.align='center'}
+house.jitter <- house
+
+house.jitter$bedrooms <- jitter(house$bedrooms, factor = 2.5)
+house.jitter$bathrooms <- jitter(house$bathrooms, factor = 5)
+house.jitter$floors <- jitter(house$floors, factor = 5)
+```
+
+We will remove houses with a price of 0 for later use in best subsets and logging the response variable.
+```{r}
+house <- house[!(house$price == 0),]
+house.jitter <- house.jitter[!(house.jitter$price == 0),]
+```
+
+# Perfom variable selection to narrow down predictor variables
+
+Since we have categorical variables with more than two levels, the regsubsets function will be used. BIC will be our metric cutoff.
+```{r, fig.align='center'}
+regsubsets.out <-
+    regsubsets(price ~ .,
+               data = house,
+               nbest = 1,       # 1 best model for each number of predictors
+               nvmax = NULL,    # NULL for no limit on number of variables
+               force.in = NULL, force.out = NULL,
+               method = "exhaustive")
+regsubsets.out
+```
+
+This prints the summary of the best models and which predictors were included in each model. Each row down includes one more predictor variable than the last.
+```{r, fig.align='center'}
+summary.out <- summary(regsubsets.out)
+head(as.data.frame(summary.out$outmat), 10) # Only show the top 10 models
+```
+
+```{r, fig.align='center'}
+# ## Adjusted R2
+# plot(regsubsets.out, scale = "adjr2", main = "Adjusted R^2")
+```
+
+Here, we will plot the BIC relative to the number of predictors in the model. We want the model with the lowest BIC.
+```{r, fig.align='center'}
+plot(summary.out$bic,
+     xlab="Number of Predicors",
+     ylab="BIC")
+```
+
+```{r, fig.align='center'}
+which.min(summary.out$bic)
+```
+The 6th model in the table is the one with the lowest BIC, although that model contains sqft_lot, which, from external EDA, may cause lots of issues in meeting the linearity assumptions. Since the model with 5 predictors has a BIC not much different from the 6th model and leaves out sqft_lot, we will use that model.
+
+
+Then, we'll create a subset model with the included variables for the top 5 best models from the regsubsets method.
+```{r, fig.align='center'}
+house.subset <- subset(house, select = c(price, bedrooms, bathrooms, sqft_living,
+                                         yr_built, waterfront))
+house.jitter.subset <- subset(house.jitter, 
+                              select = c(price, bedrooms, bathrooms, sqft_living,
+                                         yr_built, waterfront))
+```
+
+Next, we'll create linear models for the selected variables
+```{r, fig.align='center'}
+house.subset.lm <- lm(house.subset)
+summary(house.subset.lm)
+
+house.jitter.subset.lm <- lm(house.jitter.subset)
+```
+
+# CHECK MODEL ASSUMPTIONS
+
+### Linearity
+
+Here we will use the jitter subset for better visualization of trends.
+
+
+#### Correlation Matrix
+```{r, fig.align='center'}
+pairs(house.jitter.subset[, c(1, 2, 3, 4, 5)], pch = 20)
+```
+
+
+#### Added-variable plots
+```{r, fig.align='center'}
+avPlots(house.jitter.subset.lm)
+```
+
+
+#### Residuals vs Predictors
+```{r, fig.align='center'}
+ggplot(data = house.jitter.subset, 
+       mapping = aes(x = bedrooms, y = house.subset.lm$residuals)) +
+  geom_point(alpha = 0.2) +
+  theme_bw() +
+  ylab("Residuals") +
+  theme(aspect.ratio = 1)
+
+ggplot(data = house.jitter.subset, 
+       mapping = aes(x = bathrooms, y = house.subset.lm$residuals)) +
+  geom_point(alpha = 0.2) +
+  theme_bw() +
+  ylab("Residuals") +
+  theme(aspect.ratio = 1)
+
+ggplot(data = house.jitter.subset, 
+       mapping = aes(x = sqft_living, y = house.subset.lm$residuals)) +
+  geom_point(alpha = 0.2) +
+  theme_bw() +
+  ylab("Residuals") +
+  theme(aspect.ratio = 1)
+
+ggplot(data = house.jitter.subset, 
+       mapping = aes(x = yr_built, y = house.subset.lm$residuals)) +
+  geom_point(alpha = 0.2) +
+  theme_bw() +
+  ylab("Residuals") +
+  theme(aspect.ratio = 1)
+```
+
+
+#### Residuals vs Fitted Values
+```{r, fig.align='center'}
+autoplot(house.jitter.subset.lm,
+         which = 1,
+         ncol = 1,
+         nrow = 1) + theme_bw() +
+  theme(aspect.ratio = 1) +
+  scale_y_continuous()
+```
+
+
+Before moving on, the residuals vs fitted values plot shows the variability in residuals is not consistent across all values of the domain. We will log the price, remake the linear model, and see what the assumptions look like then.
+
+```{r, fig.align='center'}
+house.subset$price <- log(house.subset$price)
+house.subset.lm <- lm(house.subset)
+summary(house.subset.lm)
+
+house.jitter.subset$price <- log(house.jitter.subset$price)
+house.jitter.subset.lm <- lm(house.jitter.subset)
+summary(house.jitter.subset.lm)
+```
+Based on the adjusted R_squared, this model is much better overall than the previous one.
+
+
+### Rechecking Linearity
+
+
+#### Correlation Matrix
+```{r, fig.align='center'}
+# Correlation matrix
+pairs(house.jitter.subset[, c(1, 2, 3, 4, 5)], pch = 20)
+```
+
+
+#### Added-variable plots
+```{r, fig.align='center'}
+# Added variable plots 
+avPlots(house.jitter.subset.lm)
+```
+
+
+#### Residuals vs Predictors
+```{r, fig.align='center'}
+# residuals vs predictors
+
+ggplot(data = house.jitter.subset, 
+       mapping = aes(x = bedrooms, y = house.subset.lm$residuals)) +
+  geom_point(alpha = 0.2) +
+  theme_bw() +
+  ylab("Residuals") +
+  theme(aspect.ratio = 1)
+
+ggplot(data = house.jitter.subset, 
+       mapping = aes(x = bathrooms, y = house.subset.lm$residuals)) +
+  geom_point(alpha = 0.2) +
+  theme_bw() +
+  ylab("Residuals") +
+  theme(aspect.ratio = 1)
+
+ggplot(data = house.jitter.subset, 
+       mapping = aes(x = sqft_living, y = house.subset.lm$residuals)) +
+  geom_point(alpha = 0.2) +
+  theme_bw() +
+  ylab("Residuals") +
+  theme(aspect.ratio = 1)
+
+ggplot(data = house.jitter.subset, 
+       mapping = aes(x = yr_built, y = house.subset.lm$residuals)) +
+  geom_point(alpha = 0.2) +
+  theme_bw() +
+  ylab("Residuals") +
+  theme(aspect.ratio = 1)
+```
+
+
+#### Residuals vs Fitted Values
+```{r, fig.align='center'}
+# Residuals vs fitted values
+autoplot(house.jitter.subset.lm,
+         which = 1,
+         ncol = 1,
+         nrow = 1) + theme_bw() +
+  theme(aspect.ratio = 1) +
+  scale_y_continuous()
+```
+Logging price seemed to fix a lot of problems and produce a better model.
+
+
+Based on the scatter plot matrix, residuals vs predictors, and residuals vs fitted values plot, the linearity assumption seems met. There is a dip on the right half of the blue line in the residuals vs fitted values plot, but we assume that isn't concerning because it's influenced by just a few points.
+
+
+### Independence
+
+All data were collected independent from each other and at random. This assumption is met.
+
+
+### Residuals are normally distributed and centered at zero
+
+
+#### Box Plot
+```{r, fig.align='center'}
+ggplot() +
+  geom_boxplot(data = house.subset, mapping = aes(y = house.subset.lm$residuals)) +
+  theme_bw() +
+  theme(aspect.ratio = 1)
+```
+
+
+#### Histogram
+```{r, fig.align='center'}
+ggplot(data = house.subset, mapping = aes(x = house.subset.lm$residuals)) +
+  geom_histogram(mapping = aes(y = ..density..), binwidth = 0.1) +
+  stat_function(fun = dnorm,
+            	color = "red",
+            	size = 1.5,
+            	args = list(mean = mean(house.subset.lm$residuals),
+            	sd = sd(house.subset.lm$residuals))) +
+  theme(aspect.ratio = 1) +
+  ggtitle("Histogram of Residuals")
+```
+
+
+#### Shaprio Wilke Test
+```{r, fig.align='center'}
+shapiro.test(house.subset.lm$residuals)
+```
+
+Both the box plot and histogram show a roughly equal spread and centered at zero, even though the Shapiro-Wilke test returned a low p-value. This could be due to potential influential points. We are okay saying this assumption is met.
+
+
+### The residuals have equal variance across all values of the domain
+
+Aside from the potential influential points, the residuals vs fitted values plot seems to be relatively ok. This assumption is met.
+
+
+### The model describes all observations
+
+
+#### DFBETAS
+```{r, fig.align='center'}
+house.subset.dfbetas <- as.data.frame(dfbetas(house.subset.lm))
+house.subset.dfbetas$obs <- 1:length(house.subset$price)
+
+ggplot(data = house.subset.dfbetas) + 
+  geom_point(mapping = aes(x = obs, y = abs(bedrooms))) +
+  geom_hline(mapping = aes(yintercept = 2 / sqrt(length(obs))), 
+             color = "red", linetype = "dashed") +  # for n > 30
+  theme_bw() +
+  theme(aspect.ratio = 1)
+
+ggplot(data = house.subset.dfbetas) + 
+  geom_point(mapping = aes(x = obs, y = abs(bathrooms))) +
+  geom_hline(mapping = aes(yintercept = 2 / sqrt(length(obs))), 
+             color = "red", linetype = "dashed") +  # for n > 30
+  theme_bw() +
+  theme(aspect.ratio = 1)
+
+ggplot(data = house.subset.dfbetas) + 
+  geom_point(mapping = aes(x = obs, y = abs(sqft_living))) +
+  geom_hline(mapping = aes(yintercept = 2 / sqrt(length(obs))), 
+             color = "red", linetype = "dashed") +  # for n > 30
+  theme_bw() +
+  theme(aspect.ratio = 1)
+
+ggplot(data = house.subset.dfbetas) + 
+  geom_point(mapping = aes(x = obs, y = abs(yr_built))) +
+  geom_hline(mapping = aes(yintercept = 2 / sqrt(length(obs))), 
+             color = "red", linetype = "dashed") +  # for n > 30
+  theme_bw() +
+  theme(aspect.ratio = 1)
+```
+
+
+#### DFFITS
+```{r, fig.align='center'}
+house.subset.dffits <- data.frame("dffits" = dffits(house.subset.lm))
+house.subset.dffits$obs <- 1:length(house.subset$price)
+
+ggplot(data = house.subset.dffits) +
+  geom_point(mapping = aes(x = obs, y = abs(dffits))) +
+  geom_hline(mapping = aes(yintercept = 2 * 
+                             sqrt(length(house.subset.lm$coefficients) / 
+                                    length(obs))),
+             color = "red", linetype = "dashed") +
+  theme_bw() +
+  theme(aspect.ratio = 1)
+
+dffits <- house.subset.dffits[abs(house.subset.dffits$dffits)
+                              > 2 * sqrt(length(house.subset.lm$coefficients)
+                                         / length(house.subset.dffits$obs)), ]
+dffits$dffits <- abs(dffits$dffits) # This makes all dffits positive so the next
+                                      # operation is easier
+
+head(dffits[order(-dffits$dffits), ]) # This code orders the dffits dataframe
+                                        # in descending order by dffits
+```
+
+
+#### Cook's Distance
+```{r, fig.align='center'}
+cooksd <- as.data.frame(cooks.distance(house.subset.lm))
+names(cooksd)[1] <- "distance" # Changes the name of the column to something prettier
+
+cooksd.temp <- as.data.frame(cooksd[cooksd$distance >= 4/length(cooksd$distance),])
+names(cooksd.temp)[1] <- "distance" # Changes the name of the column to something prettier
+
+head(cooksd.temp[order(-cooksd.temp$distance), ])
+```
+
+All the evaluation tools used agree that there is one influential point (observation 123).
+So, we will remove that observation and create a linear model.
+
+```{r, fig.align='center'}
+house.subset.new <- house.subset[-c(123),] 
+
+house.subset.new.lm <- lm(house.subset.new)
+
+house.jitter.subset.new <- house.subset[-c(123),] 
+
+house.jitter.subset.new.lm <- lm(house.jitter.subset.new)
+```
+
+
+
+Then, we will recheck this assumption.
+
+
+#### DFBETAS
+```{r, fig.align='center'}
+house.subset.new.dfbetas <- as.data.frame(dfbetas(house.subset.new.lm))
+house.subset.new.dfbetas$obs <- 1:length(house.subset.new$price)
+
+ggplot(data = house.subset.new.dfbetas) + 
+  geom_point(mapping = aes(x = obs, y = abs(bedrooms))) +
+  geom_hline(mapping = aes(yintercept = 2 / sqrt(length(obs))), 
+             color = "red", linetype = "dashed") +  # for n > 30
+  theme_bw() +
+  theme(aspect.ratio = 1)
+
+ggplot(data = house.subset.new.dfbetas) + 
+  geom_point(mapping = aes(x = obs, y = abs(bathrooms))) +
+  geom_hline(mapping = aes(yintercept = 2 / sqrt(length(obs))), 
+             color = "red", linetype = "dashed") +  # for n > 30
+  theme_bw() +
+  theme(aspect.ratio = 1)
+
+ggplot(data = house.subset.new.dfbetas) + 
+  geom_point(mapping = aes(x = obs, y = abs(sqft_living))) +
+  geom_hline(mapping = aes(yintercept = 2 / sqrt(length(obs))), 
+             color = "red", linetype = "dashed") +  # for n > 30
+  theme_bw() +
+  theme(aspect.ratio = 1)
+
+ggplot(data = house.subset.new.dfbetas) + 
+  geom_point(mapping = aes(x = obs, y = abs(yr_built))) +
+  geom_hline(mapping = aes(yintercept = 2 / sqrt(length(obs))), 
+             color = "red", linetype = "dashed") +  # for n > 30
+  theme_bw() +
+  theme(aspect.ratio = 1)
+```
+
+
+#### DFFITS
+```{r, fig.align='center'}
+house.subset.new.dffits <- data.frame("dffits" = dffits(house.subset.new.lm))
+house.subset.new.dffits$obs <- 1:length(house.subset.new$price)
+
+ggplot(data = house.subset.new.dffits) +
+  geom_point(mapping = aes(x = obs, y = abs(dffits))) +
+  geom_hline(mapping = aes(yintercept = 2 * 
+                             sqrt(length(house.subset.new.lm$coefficients) / 
+                                    length(obs))),
+             color = "red", linetype = "dashed") +
+  theme_bw() +
+  theme(aspect.ratio = 1)
+
+dffits <- house.subset.new.dffits[abs(house.subset.new.dffits$dffits)
+                              > 2 * sqrt(length(house.subset.new.lm$coefficients)
+                                         / length(house.subset.new.dffits$obs)), ]
+dffits$dffits <- abs(dffits$dffits) # This makes all dffits positive so the next
+                                      # operation is easier
+
+head(dffits[order(-dffits$dffits), ]) # This code orders the dffits dataframe
+                                        # in descending order by dffits
+```
+
+
+#### Cook's Distance
+```{r, fig.align='center'}
+cooksd <- as.data.frame(cooks.distance(house.subset.new.lm))
+names(cooksd)[1] <- "distance" # Changes the name of the column to something prettier
+
+cooksd.temp <- as.data.frame(cooksd[cooksd$distance >= 4/length(cooksd$distance),])
+names(cooksd.temp)[1] <- "distance" # Changes the name of the column to something prettier
+
+head(cooksd.temp[order(-cooksd.temp$distance), ])
+```
+
+After removing observation 123, the DFFITS and DFBETAS show that the model describes all observations.
+
+
+### No additional predictors needed
+
+We would need to understand the data more, but the given predictors from the dataset seemed fairly comprehensive. If our variable selection process worked, then we shouldn't need any more predictor variables.
+
+
+### No multicollinearity
+
+```{r, fig.align='center'}
+house.only.continuous <- house.subset.new[, 1:5]
+
+round(cor(house.only.continuous), 2)
+corrplot(cor(house.only.continuous), type = "upper")
+
+
+house.subset.new.vifs <- vif(house.subset.new.lm)
+house.subset.new.vifs
+max(house.subset.new.vifs)
+mean(house.subset.new.vifs)
+```
+
+The correlation plot wasn't very concerning. The VIFs output showed that there were no multicollinearity issues.
+
+## The linearity assumptions are met
+
+
+# Checking for interations
+
+Rather than checking for all possible combinations of interactions, we will just add those that make logical sense in the context of the data set.
+First, we will add all the noted interactions. Then, we will remove those that don't have a low p-value. Finally, we will run an anova test to see if any removed interactions had a significant effect on predicting house price.
+
+```{r, fig.align='center'}
+house.all.inter <- lm(price ~ bedrooms + bathrooms + sqft_living +
+                        yr_built + waterfront +
+                        bedrooms*bathrooms +
+                        sqft_living*bedrooms +
+                        sqft_living*bathrooms +
+                        waterfront*sqft_living,
+                      data=house.subset.new)
+
+summary(house.all.inter)
+```
+
+```{r, fig.align='center'}
+temp <- lm(price ~ bedrooms + bathrooms + sqft_living +
+                    yr_built + waterfront +
+                    sqft_living*bathrooms,
+                   data=house.subset.new)
+
+anova(house.all.inter, temp)
+```
+At least one interaction between sqft_living and bathrooms is significant and the interactions between bedrooms/bathrooms, sqft_living/waterfront, and bedrooms/sqft_living were not significant.
+
+
+Since there was no significant difference in only keeping the interaction between sqft_living and bathrooms versus all the above interactions, we will keep that as our final interaction model.
+
+```{r, fig.align='center'}
+house.inter <- temp
+summary(house.inter)
+```
+
+
+# Model assesment via model evaluation metrics
+
+### MSE
+```{r, fig.align='center'}
+model_summ<- summary(house.inter)
+mean(model_summ$residuals^2)
+```
+
+### RMSE
+```{r, fig.align='center'}
+sqrt(mean(model_summ$residuals^2))
+```
+The average error performed by the model in predicting price (log scale) is 0.3775429.
+
+
+### Multiple R-Squared
+```{r, fig.align='center'}
+summary(house.inter)$r.squared
+```
+51.53% of the variability in the model is explained by the predictors.
+
+
+### Adjusted R-Squared
+```{r, fig.align='center'}
+summary(house.inter)$adj.r.squared
+```
+51.47% of the variability in the model is explained by the predictors, when accounting for the number of predictors.
+
+
+### F-Statistic
+```{r, fig.align='center'}
+summary(house.inter)$fstatistic
+```
+There is a significant linear relationship between house price (log scale) and the predictors in the model.
+
+
+# Statistical Inference
+
+### Confidence interval for slopes
+```{r, fig.align='center'}
+exp(confint(house.inter, level= 0.95)) # Convert back from the log scale
+```
+Interpretation of intercept:
+
+We are 95% confident that the average price for houses with no bedrooms, no bathrooms, no square feet of living space, built in the year 0, and not on the waterfront is between about 9,547.53 and 13,687.45 dollars.
+
+
+### Confidence interval for house with 5 bedrooms, 3 bathrooms, 4500 square feet of living space, built in 2015, and on the waterfront
+```{r, fig.align='center'}
+confidence <- 
+  predict(house.inter,
+          newdata=data.frame(bedrooms=5,
+                             bathrooms=3,
+                             sqft_living=4500,
+                             yr_built=2015,
+                             waterfront="yes"),
+          interval="confidence",
+          level=.95)
+
+exp(confidence) # Convert back from the log scale
+```
+We are 95% confident that the average price for houses with 5 bedrooms, 3 bathrooms, 4,500 square feet of living space, built in the year 2015, and on the waterfront is between 1,230,638  and 1,628,448 dollars.
+
+
+### Prediction interval for house with 5 bedrooms, 3 bathrooms, 4500 square feet of living space, built in 2015, and on the waterfront 
+```{r, fig.align='center'}
+prediction <- 
+  predict(house.inter,
+          newdata=data.frame(bedrooms=5,
+                             bathrooms=3,
+                             sqft_living=4500,
+                             yr_built=2015,
+                             waterfront="yes"),
+          interval="prediction",
+          level=.95)
+
+exp(prediction) # Convert back from the log scale
+```
+We are 95% confident that the price for a house with 5 bedrooms, 3 bathrooms, 4,500 square feet of living space, built in the year 2015, and on the waterfront is between 666,123.2 and 3,008,497 dollars.
+
+
+# Summary and conclusions
+
+Understanding how different aspects of a home can help real estate agents, homeowners, buyers, and appraisers predict the selling price. We conducted an analysis to determine which of these types of variables significantly affect the price. After fitting a multiple linear regression model, we found that bedrooms, bathrooms, square feet of living space, the year the house was built (the newer the house, the more expensive it is), and whether or not the house is located on a waterfront (if it is on a waterfront it is worth more) does indeed have a significant impact on what the home will sell for.
+
+
+Additionally, we also found that square feet of basement space, square feet of lot space, views a house has, the number of floors a house has, condition of the house, square footage above ground, and if it was renovated does not have as significant impact on house prices as the previously discussed variables. This is beneficial for people in the market to buy a home, as they are more capable of knowing whether or not they are getting a good deal.
